@@ -9,163 +9,122 @@
 #include "events/EventQueue.h"
 #include <cstring>
 
-// ---------------- UART ----------------
+/* ================= UART ================= */
 UnbufferedSerial pc(USBTX, USBRX, 115200);
-UnbufferedSerial esp(PA_9, PA_10, 115200);
-
-// LED
+UnbufferedSerial esp(PA_9, PA_10, 115200); // gardé pour plus tard
 DigitalOut led_rx(LED1);
 
-// ---------------- LoRaWAN ----------------
+/* ================= LoRaWAN ================= */
 static EventQueue ev_queue;
 SX1276_LoRaRadio radio;
 LoRaWANInterface lorawan(radio);
 
-// TTN credentials
-static uint8_t DEV_EUI[] = {0x70, 0xB3, 0xD5, 0x7E, 0xD0, 0x07, 0x5A, 0x34};
-static uint8_t APP_EUI[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-static uint8_t APP_KEY[] = {0x92, 0xA8, 0xAA, 0x1A, 0x93, 0x0E, 0x10, 0xF4,
-                            0xB7, 0x80, 0x97, 0xC2, 0x9B, 0x07, 0xC1, 0xB5};
-
 volatile bool lora_joined = false;
+Ticker test_ticker;
 
-// ---------------- Buffer UART ----------------
-char line[64];
-int idx = 0;
+/* ================= TTN KEYS ================= */
+static uint8_t DEV_EUI[] = { 0x70, 0xB3, 0xD5, 0x7E, 0xD0, 0x07, 0x5A, 0x34 };
+static uint8_t APP_EUI[] = { 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00 };
+static uint8_t APP_KEY[] = {
+    0x92,0xA8,0xAA,0x1A,
+    0x93,0x0E,0x10,0xF4,
+    0xB7,0x80,0x97,0xC2,
+    0x9B,0x07,0xC1,0xB5
+};
 
-// ---------------- LoRaWAN event handler ----------------
+/* ================= UPLINK ================= */
+void send_payload()
+{
+    if (!lora_joined) {
+        pc.write("Not joined yet\r\n", 15);
+        return;
+    }
+
+    uint8_t payload[4] = {
+        0x00, // réservé
+        0x01, // occupied
+        3,    // persons
+        95    // confidence
+    };
+
+    pc.write("Sending TEST uplink\r\n", 21);
+
+    int16_t status = lorawan.send(15, payload, sizeof(payload), MSG_UNCONFIRMED_FLAG);
+
+    switch (status) {
+        case LORAWAN_STATUS_OK:
+            pc.write("Uplink queued\r\n", 15);
+            break;
+
+        case LORAWAN_STATUS_WOULD_BLOCK:
+            pc.write("LoRa busy, uplink queued\r\n", 27);
+            break;
+
+        case LORAWAN_STATUS_DUTYCYCLE_RESTRICTED:
+            pc.write("Duty cycle restricted\r\n", 23);
+            break;
+
+        default:
+            pc.write("LoRa send error\r\n", 17);
+            break;
+    }
+
+
+    led_rx = !led_rx;
+}
+
+/* Appelé depuis ISR → on POSTE dans l’EventQueue */
+void ticker_callback()
+{
+    ev_queue.call(send_payload);
+}
+
+/* ================= EVENTS ================= */
 void lora_event_handler(lorawan_event_t event)
 {
     switch (event) {
 
         case CONNECTED:
-            pc.write("LoRaWAN: JOIN SUCCESS\r\n", 23);
+            pc.write("LoRaWAN JOIN SUCCESS\r\n", 24);
             lora_joined = true;
-            break;
 
-        case DISCONNECTED:
-            pc.write("LoRaWAN: DISCONNECTED\r\n", 24);
-            lora_joined = false;
+            // Ticker = déclencheur uniquement
+            test_ticker.attach(ticker_callback, 30s);
             break;
 
         case TX_DONE:
-            pc.write("LoRaWAN: TX DONE\r\n", 18);
-            break;
-
-        case TX_TIMEOUT:
-            pc.write("LoRaWAN: TX TIMEOUT\r\n", 21);
-            break;
-
-        case TX_ERROR:
-            pc.write("LoRaWAN: TX ERROR\r\n", 19);
-            break;
-
-        case RX_DONE:
-            pc.write("LoRaWAN: RX DONE (downlink)\r\n", 30);
+            pc.write("TX DONE\r\n", 9);
             break;
 
         case JOIN_FAILURE:
-            pc.write("LoRaWAN: JOIN FAILED\r\n", 24);
+            pc.write("JOIN FAILED\r\n", 13);
             break;
 
         default:
-            pc.write("LoRaWAN: UNKNOWN EVENT\r\n", 25);
             break;
     }
 }
 
-// FIX ✅ structure de callbacks
-static lorawan_app_callbacks_t callbacks = {
-    .events = lora_event_handler
-};
-
-// ---------------- Send uplink ----------------
-void send_payload_to_ttn(uint8_t* payload, size_t len)
-{
-    if (!lora_joined) {
-        pc.write("LoRaWAN not joined yet, uplink skipped\r\n", 44);
-        return;
-    }
-
-    pc.write("Sending uplink...\r\n", 19);
-
-    int16_t status = lorawan.send(15, payload, len, MSG_UNCONFIRMED_FLAG);
-
-    if (status == LORAWAN_STATUS_OK) {
-        pc.write("LoRaWAN send accepted\r\n", 24);
-    } else {
-        pc.write("LoRaWAN send FAILED, code=", 28);
-        char buf[6];
-        snprintf(buf, sizeof(buf), "%d", status);
-        pc.write(buf, strlen(buf));
-        pc.write("\r\n", 2);
-    }
-}
-
+/* ================= MAIN ================= */
 int main()
 {
-    pc.write("STM32 ready - listening on D2 (PA10)\r\n", 40);
+    pc.write("STM32 ready - LoRaWAN TEST MODE\r\n", 36);
 
-    // ---------------- LoRaWAN init ----------------
     lorawan.initialize(&ev_queue);
-    lorawan.add_app_callbacks(&callbacks);   // FIX ✅
 
-    lorawan_connect_t connect_params;
-    connect_params.connect_type = LORAWAN_CONNECTION_OTAA;
-    connect_params.connection_u.otaa.dev_eui = DEV_EUI;
-    connect_params.connection_u.otaa.app_eui = APP_EUI;
-    connect_params.connection_u.otaa.app_key = APP_KEY;
+    static lorawan_app_callbacks_t callbacks;
+    callbacks.events = lora_event_handler;
+    lorawan.add_app_callbacks(&callbacks);
 
-    lorawan.connect(connect_params);
-    pc.write("Joining TTN network...\r\n", 25);
+    lorawan_connect_t params;
+    params.connect_type = LORAWAN_CONNECTION_OTAA;
+    params.connection_u.otaa.dev_eui = DEV_EUI;
+    params.connection_u.otaa.app_eui = APP_EUI;
+    params.connection_u.otaa.app_key = APP_KEY;
+    params.connection_u.otaa.nb_trials = 3;
 
-    // ---------------- Main loop ----------------
-    while (true) {
+    pc.write("Joining TTN...\r\n", 16);
+    lorawan.connect(params);
 
-        while (esp.readable()) {
-            char c;
-            if (esp.read(&c, 1) == 1) {
-
-                pc.write(&c, 1);
-
-                if (c == '\n' || idx >= sizeof(line) - 1) {
-                    line[idx] = '\0';
-
-                    // Format: occupied,3,95
-                    char* token = strtok(line, ",");
-                    bool occupied = false;
-                    uint8_t nb_persons = 0;
-                    uint8_t confidence = 0;
-
-                    if (token) {
-                        occupied = (strcmp(token, "occupied") == 0);
-                        token = strtok(NULL, ",");
-                    }
-                    if (token) {
-                        nb_persons = atoi(token);
-                        token = strtok(NULL, ",");
-                    }
-                    if (token) {
-                        confidence = atoi(token);
-                    }
-
-                    uint8_t payload[4];
-                    payload[0] = 0x00;
-                    payload[1] = occupied ? 0x01 : 0x00;
-                    payload[2] = nb_persons;
-                    payload[3] = confidence;
-
-                    send_payload_to_ttn(payload, 4);
-
-                    led_rx = !led_rx;
-                    idx = 0;
-                }
-                else {
-                    line[idx++] = c;
-                }
-            }
-        }
-
-        ThisThread::sleep_for(10ms);
-    }
+    ev_queue.dispatch_forever();
 }
