@@ -1,0 +1,26 @@
+name: uplink-lorawan CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ARM toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi
+
+      - name: Build firmware
+        run: make
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: stm32-lora-firmware
+          path: build/*.bin
