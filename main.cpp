@@ -116,15 +116,26 @@ int main() {
     stats_timer.start();
     
     uint8_t byte;
+    char line_buffer[128];
+    int line_idx = 0;
     
     while (true) {
-        // Lire depuis ESP32
+        // Lire depuis ESP32 (RAPIDE - pas d'écriture PC)
         if (esp.readable()) {
             if (esp.read(&byte, 1) == 1) {
-                // Afficher l'octet sur PC (debug simple)
-                pc.write(&byte, 1);
+                // Bufferiser localement
+                if (byte == '\n') {
+                    // Fin de ligne - afficher tout d'un coup
+                    line_buffer[line_idx++] = '\r';
+                    line_buffer[line_idx++] = '\n';
+                    pc.write(line_buffer, line_idx);
+                    line_idx = 0;
+                } else if (byte != '\r' && line_idx < sizeof(line_buffer) - 2) {
+                    // Accumuler caractère
+                    line_buffer[line_idx++] = byte;
+                }
                 
-                // Traiter l'octet dans le protocole
+                // Traiter dans le protocole
                 uart_rx_process_byte(byte);
             }
         }
