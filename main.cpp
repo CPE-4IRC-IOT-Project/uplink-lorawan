@@ -53,7 +53,7 @@ void uart_rx_process_byte(uint8_t byte) {
                 rx_state = STATE_RECEIVE_DATA;
                 
                 // Debug: SOF trouvé
-                const char *sof_msg = "[SOF] ";
+                const char *sof_msg = "\r\n[SOF]\r\n";
                 pc.write(sof_msg, strlen(sof_msg));
             }
             break;
@@ -64,47 +64,29 @@ void uart_rx_process_byte(uint8_t byte) {
             if (rx_index >= sizeof(uart_event_frame_t)) {
                 uart_event_frame_t *frame = (uart_event_frame_t *)rx_buffer;
                 
-                // Debug: afficher la trame complète en hex
-                char hex_msg[80];
-                int len = snprintf(hex_msg, sizeof(hex_msg),
-                                  "\r\n[FRAME] ");
-                pc.write(hex_msg, len);
-                
-                for (size_t i = 0; i < sizeof(uart_event_frame_t); i++) {
-                    len = snprintf(hex_msg, sizeof(hex_msg), "%02X ", rx_buffer[i]);
-                    pc.write(hex_msg, len);
-                }
-                pc.write("\r\n", 2);
-                
                 if (validate_frame(frame, last_valid_counter)) {
                     // Trame valide
                     last_valid_counter = frame->counter;
                     stats.valid_frames++;
                     
                     // Toggle LED
-                    led = !led;
+                    led = !led
+;
                     
                     // Afficher sur PC
                     char msg[100];
-                    len = snprintf(msg, sizeof(msg),
-                                  "[✓ VALID] Node:%u Count:%u Conf:%u%% Flags:0x%02X Counter:%u\r\n",
-                                  frame->node_id, frame->count, 
-                                  frame->confidence, frame->flags, frame->counter);
+                    int len = snprintf(msg, sizeof(msg),
+                                      "[VALID] Node:%u Count:%u Conf:%u%% Counter:%u\r\n",
+                                      frame->node_id, frame->count, 
+                                      frame->confidence, frame->counter);
                     if (len > 0) {
                         pc.write(msg, len);
                     }
                 } else {
-                    // Trame invalide - afficher détails
+                    // Trame invalide
                     stats.invalid_crc++;
-                    
-                    // Calculer le CRC pour comparer
-                    uint16_t calc_crc = crc16_ccitt(rx_buffer, sizeof(uart_event_frame_t) - 2);
-                    
-                    char err[120];
-                    len = snprintf(err, sizeof(err),
-                                  "[✗ INVALID] SOF:%02X LEN:%u CRC_rcv:%04X CRC_calc:%04X Counter:%u\r\n",
-                                  frame->sof, frame->len, frame->crc, calc_crc, frame->counter);
-                    pc.write(err, len);
+                    const char *err = "[INVALID]\r\n";
+                    pc.write(err, strlen(err));
                 }
                 
                 stats.total_frames++;
@@ -134,23 +116,15 @@ int main() {
     stats_timer.start();
     
     uint8_t byte;
-    uint32_t byte_count = 0;
     
     while (true) {
         // Lire depuis ESP32
         if (esp.readable()) {
             if (esp.read(&byte, 1) == 1) {
-                byte_count++;
+                // Afficher l'octet sur PC (debug simple)
+                pc.write(&byte, 1);
                 
-                // Debug: afficher octet brut tous les 16 octets (pour lisibilité)
-                if (byte_count % 16 == 1) {
-                    pc.write("\r\n", 2);
-                }
-                char hex[4];
-                int len = snprintf(hex, sizeof(hex), "%02X ", byte);
-                pc.write(hex, len);
-                
-                // Traiter l'octet
+                // Traiter l'octet dans le protocole
                 uart_rx_process_byte(byte);
             }
         }
