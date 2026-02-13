@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 // ============================================================================
 // Définitions du protocole UART ESP32-P4 → STM32

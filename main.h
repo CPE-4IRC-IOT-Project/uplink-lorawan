@@ -14,7 +14,13 @@ extern "C" {
 #endif
 
 /* Includes ------------------------------------------------------------------*/
+#include <stdint.h>
+#include <stdbool.h>
+
+/* Conditional HAL include - comment out if not using STM32 HAL */
+#ifdef USE_HAL_DRIVER
 #include "stm32l4xx_hal.h"
+#endif
 
 /* Exported functions prototypes ---------------------------------------------*/
 void Error_Handler(void);

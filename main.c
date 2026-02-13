@@ -3,13 +3,14 @@
 // Adapté depuis Mbed C++ vers HAL STM32 C
 // ============================================================================
 
+#include <stdbool.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+#include <stdio.h>
 #include "protocol_uart.h"
 #include "main.h"
 #include "stm32l4xx_hal.h"
-#include <stdbool.h>
-#include <stdint.h>
-#include <string.h>
-#include <stdio.h>
 
 // ============================================================================
 // Handlers UART (déclarés globalement)

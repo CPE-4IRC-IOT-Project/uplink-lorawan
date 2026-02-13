@@ -41,7 +41,7 @@ GND         ───   GND
 
 | Fichier | Description |
 |---------|-------------|
-| `stm32_uart_receiver_example.c` | Code principal complet |
+| `main.c` | Code principal complet (prêt à compiler) |
 | `protocol_uart.h` | Header protocole (partagé avec ESP32) |
 | `main.h` | Header main avec defines |
 
@@ -49,9 +49,9 @@ GND         ───   GND
 
 ### Option 1 : STM32CubeIDE
 1. Créer un nouveau projet STM32L4xx (ex: Nucleo-L476RG)
-2. Copier les fichiers dans `Core/Src/` et `Core/Inc/`
-3. Activer USART1 et USART2 dans .ioc
-4. Build le projet
+2. Remplacer `Core/Src/main.c` par notre `main.c`
+3. Copier `protocol_uart.h` et `main.h` dans `Core/Inc/`
+4. Build le projet (pas besoin de .ioc, tout est dans le code)
 
 ### Option 2 : Mbed Studio
 1. Créer un projet Mbed OS 6
@@ -63,7 +63,7 @@ GND         ───   GND
 arm-none-eabi-gcc -mcpu=cortex-m4 -mthumb \
   -DSTM32L476xx -DUSE_HAL_DRIVER \
   -I/path/to/HAL/includes \
-  stm32_uart_receiver_example.c \
+  main.c \
   -o stm32_receiver.elf
 ```
 
@@ -181,9 +181,9 @@ if ((HAL_GetTick() - last_stats_time) > 60000) {  // 60s au lieu de 30s
 
 ## ✅ Checklist intégration
 
-- [ ] Copier `stm32_uart_receiver_example.c` dans projet
-- [ ] Copier `protocol_uart.h` dans projet
-- [ ] Créer `main.h` avec defines
+- [ ] Remplacer `main.c` de votre projet par notre `main.c`
+- [ ] Copier `protocol_uart.h` dans `Core/Inc/`
+- [ ] Copier `main.h` dans `Core/Inc/`
 - [ ] Configurer USART1 (PA9/PA10) à 115200
 - [ ] Configurer USART2 (PA2/PA3) à 115200
 - [ ] Activer interruptions USART1
