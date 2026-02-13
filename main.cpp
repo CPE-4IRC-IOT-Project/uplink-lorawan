@@ -10,7 +10,7 @@
 #include <cstring>
 
 /* ================= CONFIG ================= */
-#define PROTO_SOF 0xA5
+#define PROTO_SOF 0xAA
 #define FRAME_LEN 16
 
 /* ================= UART ================= */
@@ -52,11 +52,25 @@ void send_payload(uint8_t event_id, uint8_t count, uint8_t conf)
 
     uint8_t payload[4];
     payload[0] = 0x00;
-    payload[1] = (event_id != 0) ? 1 : 0;
+    payload[1] = (count > 0) ? 1 : 0;   // occupied = au moins 1 personne
     payload[2] = count;
     payload[3] = conf;
 
-    pc.write("LoRa uplink\r\n", 13);
+    /* Log TTN uplink */
+    char line[64];
+    int n = snprintf(line, sizeof(line),
+        "[TX LoRa] port=15 | ");
+    pc.write(line, n);
+    for (int i = 0; i < 4; i++) {
+        char hx[4];
+        snprintf(hx, sizeof(hx), "%02X ", payload[i]);
+        pc.write(hx, 3);
+    }
+    n = snprintf(line, sizeof(line),
+        "| occ=%u cnt=%u conf=%u%%\r\n",
+        payload[1], payload[2], payload[3]);
+    pc.write(line, n);
+
     lorawan.send(15, payload, sizeof(payload), MSG_UNCONFIRMED_FLAG);
     led_rx = !led_rx;
 }
@@ -64,28 +78,38 @@ void send_payload(uint8_t event_id, uint8_t count, uint8_t conf)
 /* ================= UART FRAME PARSER ================= */
 void process_frame(uint8_t *f)
 {
-    // Affichage hex pour debug
-    pc.write("Received frame: ", 16);
+    /* Affichage hex complet de la trame recue */
+    pc.write("[RX UART] ", 10);
     for (int i = 0; i < FRAME_LEN; i++) {
-        char buf[4];
-        snprintf(buf, sizeof(buf), "%02X ", f[i]);
-        pc.write(buf, strlen(buf));
+        char hx[4];
+        snprintf(hx, sizeof(hx), "%02X ", f[i]);
+        pc.write(hx, 3);
     }
     pc.write("\r\n", 2);
 
+    /* Verification CRC */
     uint16_t rx_crc = (f[14] << 8) | f[15];
     uint16_t calc_crc = crc16_ccitt(&f[1], 13);
 
     if (rx_crc != calc_crc) {
-        pc.write("CRC ERROR\r\n", 11);
+        char err[48];
+        int n = snprintf(err, sizeof(err),
+            "[RX UART] CRC FAIL rx=%04X calc=%04X\r\n", rx_crc, calc_crc);
+        pc.write(err, n);
         return;
     }
 
     uint8_t event_id = f[8];
     uint8_t count    = f[9];
     uint8_t conf     = f[10];
+    uint16_t pkt_cnt = (f[12] << 8) | f[13];
 
-    pc.write("Frame OK → TTN\r\n", 16);
+    char info[80];
+    int n = snprintf(info, sizeof(info),
+        "[RX UART] CRC OK | evt=0x%02X cnt=%u conf=%u%% pkt#%u\r\n",
+        event_id, count, conf, pkt_cnt);
+    pc.write(info, n);
+
     ev_queue.call(send_payload, event_id, count, conf);
 }
 
@@ -129,12 +153,17 @@ int main()
             uint8_t b;
             esp.read(&b, 1);
 
-            // DEBUG : afficher chaque byte reçu
-            char dbg[6];
-            snprintf(dbg, sizeof(dbg), "%02X ", b);
-            pc.write(dbg, strlen(dbg));
-
             if (!sync) {
+                if (b == PROTO_SOF) {
+                    buf[0] = b;
+                    idx = 1;
+                    sync = true;
+                }
+            } else if (idx == 1 && b != 0x0F) {
+                /* LEN invalide → faux SOF, on resync */
+                sync = false;
+                idx = 0;
+                /* Ce byte pourrait etre un vrai SOF */
                 if (b == PROTO_SOF) {
                     buf[0] = b;
                     idx = 1;
