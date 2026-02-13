@@ -9,112 +9,106 @@
 #include "events/EventQueue.h"
 #include <cstring>
 
+/* ================= CONFIG ================= */
+#define PROTO_SOF 0xA5
+#define FRAME_LEN 16
+
 /* ================= UART ================= */
 UnbufferedSerial pc(USBTX, USBRX, 115200);
-UnbufferedSerial esp(PA_9, PA_10, 115200); // gardé pour plus tard
+UnbufferedSerial esp(PA_9, PA_10, 115200); // RX = D2
 DigitalOut led_rx(LED1);
 
 /* ================= LoRaWAN ================= */
 static EventQueue ev_queue;
 SX1276_LoRaRadio radio;
 LoRaWANInterface lorawan(radio);
-
 volatile bool lora_joined = false;
-Ticker test_ticker;
 
 /* ================= TTN KEYS ================= */
-static uint8_t DEV_EUI[] = { 0x70, 0xB3, 0xD5, 0x7E, 0xD0, 0x07, 0x5A, 0x34 };
-static uint8_t APP_EUI[] = { 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00 };
+static uint8_t DEV_EUI[] = { 0x70,0xB3,0xD5,0x7E,0xD0,0x07,0x5A,0x34 };
+static uint8_t APP_EUI[] = { 0,0,0,0,0,0,0,0 };
 static uint8_t APP_KEY[] = {
-    0x92,0xA8,0xAA,0x1A,
-    0x93,0x0E,0x10,0xF4,
-    0xB7,0x80,0x97,0xC2,
-    0x9B,0x07,0xC1,0xB5
+    0x92,0xA8,0xAA,0x1A,0x93,0x0E,0x10,0xF4,
+    0xB7,0x80,0x97,0xC2,0x9B,0x07,0xC1,0xB5
 };
 
-/* ================= UPLINK ================= */
-void send_payload()
+/* ================= CRC16 CCITT ================= */
+uint16_t crc16_ccitt(const uint8_t *data, size_t len)
 {
-    if (!lora_joined) {
-        pc.write("Not joined yet\r\n", 15);
-        return;
+    uint16_t crc = 0xFFFF;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= (uint16_t)data[i] << 8;
+        for (int j = 0; j < 8; j++) {
+            crc = (crc & 0x8000) ? (crc << 1) ^ 0x1021 : (crc << 1);
+        }
     }
+    return crc;
+}
 
-    uint8_t payload[4] = {
-        0x00, // réservé
-        0x01, // occupied
-        3,    // persons
-        95    // confidence
-    };
+/* ================= SEND TO TTN ================= */
+void send_payload(uint8_t event_id, uint8_t count, uint8_t conf)
+{
+    if (!lora_joined) return;
 
-    pc.write("Sending TEST uplink\r\n", 21);
+    uint8_t payload[4];
+    payload[0] = 0x00;
+    payload[1] = (event_id != 0) ? 1 : 0;
+    payload[2] = count;
+    payload[3] = conf;
 
-    int16_t status = lorawan.send(15, payload, sizeof(payload), MSG_UNCONFIRMED_FLAG);
-
-    switch (status) {
-        case LORAWAN_STATUS_OK:
-            pc.write("Uplink queued\r\n", 15);
-            break;
-
-        case LORAWAN_STATUS_WOULD_BLOCK:
-            pc.write("LoRa busy, uplink queued\r\n", 27);
-            break;
-
-        case LORAWAN_STATUS_DUTYCYCLE_RESTRICTED:
-            pc.write("Duty cycle restricted\r\n", 23);
-            break;
-
-        default:
-            pc.write("LoRa send error\r\n", 17);
-            break;
-    }
-
-
+    pc.write("LoRa uplink\r\n", 13);
+    lorawan.send(15, payload, sizeof(payload), MSG_UNCONFIRMED_FLAG);
     led_rx = !led_rx;
 }
 
-/* Appelé depuis ISR → on POSTE dans l’EventQueue */
-void ticker_callback()
+/* ================= UART FRAME PARSER ================= */
+void process_frame(uint8_t *f)
 {
-    ev_queue.call(send_payload);
+    // Affichage hex pour debug
+    pc.write("Received frame: ", 16);
+    for (int i = 0; i < FRAME_LEN; i++) {
+        char buf[4];
+        snprintf(buf, sizeof(buf), "%02X ", f[i]);
+        pc.write(buf, strlen(buf));
+    }
+    pc.write("\r\n", 2);
+
+    uint16_t rx_crc = (f[14] << 8) | f[15];
+    uint16_t calc_crc = crc16_ccitt(&f[1], 13);
+
+    if (rx_crc != calc_crc) {
+        pc.write("CRC ERROR\r\n", 11);
+        return;
+    }
+
+    uint8_t event_id = f[8];
+    uint8_t count    = f[9];
+    uint8_t conf     = f[10];
+
+    pc.write("Frame OK → TTN\r\n", 16);
+    ev_queue.call(send_payload, event_id, count, conf);
 }
 
-/* ================= EVENTS ================= */
+
+/* ================= LoRa EVENTS ================= */
 void lora_event_handler(lorawan_event_t event)
 {
-    switch (event) {
-
-        case CONNECTED:
-            pc.write("LoRaWAN JOIN SUCCESS\r\n", 24);
-            lora_joined = true;
-
-            // Ticker = déclencheur uniquement
-            test_ticker.attach(ticker_callback, 30s);
-            break;
-
-        case TX_DONE:
-            pc.write("TX DONE\r\n", 9);
-            break;
-
-        case JOIN_FAILURE:
-            pc.write("JOIN FAILED\r\n", 13);
-            break;
-
-        default:
-            break;
+    if (event == CONNECTED) {
+        pc.write("LoRaWAN JOIN OK\r\n", 18);
+        lora_joined = true;
     }
 }
 
 /* ================= MAIN ================= */
 int main()
 {
-    pc.write("STM32 ready - LoRaWAN TEST MODE\r\n", 36);
+    pc.write("STM32 UART BIN → LoRaWAN\r\n", 28);
 
+    /* LoRa init */
     lorawan.initialize(&ev_queue);
-
-    static lorawan_app_callbacks_t callbacks;
-    callbacks.events = lora_event_handler;
-    lorawan.add_app_callbacks(&callbacks);
+    static lorawan_app_callbacks_t cb;
+    cb.events = lora_event_handler;
+    lorawan.add_app_callbacks(&cb);
 
     lorawan_connect_t params;
     params.connect_type = LORAWAN_CONNECTION_OTAA;
@@ -122,9 +116,40 @@ int main()
     params.connection_u.otaa.app_eui = APP_EUI;
     params.connection_u.otaa.app_key = APP_KEY;
     params.connection_u.otaa.nb_trials = 3;
-
-    pc.write("Joining TTN...\r\n", 16);
     lorawan.connect(params);
 
-    ev_queue.dispatch_forever();
+    /* UART reception */
+    uint8_t buf[FRAME_LEN];
+    uint8_t idx = 0;
+    bool sync = false;
+
+    while (true) {
+
+        while (esp.readable()) {
+            uint8_t b;
+            esp.read(&b, 1);
+
+            // DEBUG : afficher chaque byte reçu
+            char dbg[6];
+            snprintf(dbg, sizeof(dbg), "%02X ", b);
+            pc.write(dbg, strlen(dbg));
+
+            if (!sync) {
+                if (b == PROTO_SOF) {
+                    buf[0] = b;
+                    idx = 1;
+                    sync = true;
+                }
+            } else {
+                buf[idx++] = b;
+                if (idx == FRAME_LEN) {
+                    process_frame(buf);
+                    sync = false;
+                    idx = 0;
+                }
+            }
+        }
+
+        ev_queue.dispatch_for(10ms);
+    }
 }
