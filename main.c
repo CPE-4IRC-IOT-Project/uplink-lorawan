@@ -8,6 +8,7 @@
 
 #define REG32(addr) (*(volatile uint32_t *)(addr))
 
+#define RCC_CFGR_ADDR       0x4002100CUL
 #define RCC_IOPENR_ADDR     0x4002102CUL
 #define RCC_APB2ENR_ADDR    0x40021034UL
 #define RCC_APB1ENR_ADDR    0x40021038UL
@@ -45,7 +46,6 @@
 #define NVIC_ISER0_ADDR     0xE000E100UL
 #define USART1_IRQN         26U
 
-#define PERIPH_CLK_HZ       2097000UL
 #define BAUDRATE            115200UL
 
 #define RX_BUFFER_SIZE      256U
@@ -87,6 +87,8 @@ static uint8_t s_payload[UART_V1_PAYLOAD_LEN] = {0};
 static uint8_t s_payload_index = 0U;
 static uint8_t s_crc_rx[2] = {0};
 static uint8_t s_crc_index = 0U;
+
+extern uint32_t SystemCoreClock;
 
 static void uart2_write_char(uint8_t ch)
 {
@@ -275,9 +277,36 @@ static void gpio_init(void)
   REG32(GPIOA_AFRH_ADDR) = afrh;
 }
 
+static uint32_t get_apb1_clock_hz(void)
+{
+  uint32_t hclk = SystemCoreClock;
+  uint32_t cfgr = REG32(RCC_CFGR_ADDR);
+
+  uint32_t hpre = (cfgr >> 4) & 0x0FU;
+  uint32_t hclk_div = 1U;
+  if (hpre >= 0x08U) {
+    static const uint16_t ahb_div_table[8] = {2U, 4U, 8U, 16U, 64U, 128U, 256U, 512U};
+    hclk_div = ahb_div_table[hpre - 0x08U];
+  }
+  uint32_t ahb_clk = hclk / hclk_div;
+
+  uint32_t ppre1 = (cfgr >> 8) & 0x07U;
+  uint32_t apb1_div = 1U;
+  if (ppre1 >= 0x04U) {
+    static const uint8_t apb_div_table[4] = {2U, 4U, 8U, 16U};
+    apb1_div = apb_div_table[ppre1 - 0x04U];
+  }
+
+  return ahb_clk / apb1_div;
+}
+
 static void uart_init(void)
 {
-  const uint32_t brr = (PERIPH_CLK_HZ + (BAUDRATE / 2UL)) / BAUDRATE;
+  uint32_t pclk1_hz = get_apb1_clock_hz();
+  if (pclk1_hz == 0U) {
+    pclk1_hz = SystemCoreClock;
+  }
+  const uint32_t brr = (pclk1_hz + (BAUDRATE / 2UL)) / BAUDRATE;
 
   REG32(RCC_APB2ENR_ADDR) |= RCC_APB2ENR_USART1EN;
   REG32(RCC_APB1ENR_ADDR) |= RCC_APB1ENR_USART2EN;
@@ -317,6 +346,7 @@ int main(void)
   gpio_init();
   uart_init();
 
+  log_line("[BOOT] pclk1=%lu baud=%lu\n", (unsigned long)get_apb1_clock_hz(), (unsigned long)BAUDRATE);
   log_line("[BOOT] parser ready fport=%u\n", (unsigned)LORAWAN_FPORT);
 
   uint32_t last_overflow = 0U;
