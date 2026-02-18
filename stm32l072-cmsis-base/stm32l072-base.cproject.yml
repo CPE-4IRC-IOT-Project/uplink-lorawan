@@ -1,7 +1,8 @@
 project:
   packs:
     - pack: ARM::CMSIS
-    - pack: Keil::STM32L0xx_DFP
+    - pack: Keil::ARM_Compiler
+    - pack: Keil::STM32L0xx_DFP@2.3.0
 
   output:
     type:
@@ -11,7 +12,7 @@ project:
 
   components:
     - component: CMSIS:CORE
-    - component: Device:CubeMX
+    - component: Device:Startup
 
   groups:
     - group: Application
