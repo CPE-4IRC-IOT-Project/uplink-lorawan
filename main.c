@@ -70,6 +70,8 @@ typedef struct {
 } runtime_stats_t;
 
 static runtime_stats_t s_stats = {0};
+static uint32_t s_rx_bytes_total = 0U;
+static bool s_rx_seen_once = false;
 
 typedef enum {
   PARSER_WAIT_SOF1 = 0,
@@ -184,6 +186,12 @@ static void on_payload_valid(const uint8_t *payload_bytes)
 
 static void handle_uart_byte(uint8_t byte)
 {
+  s_rx_bytes_total++;
+  if (!s_rx_seen_once) {
+    s_rx_seen_once = true;
+    log_line("[UART_RX] first_byte=0x%02X\n", (unsigned)byte);
+  }
+
   switch (s_parser_state) {
     case PARSER_WAIT_SOF1:
       if (byte == UART_V1_SOF1) {
@@ -280,9 +288,7 @@ static void uart_init(void)
 
   USART_CR1(USART1_BASE) = 0U;
   USART_BRR(USART1_BASE) = brr;
-  USART_CR1(USART1_BASE) = USART_CR1_UE | USART_CR1_RE | USART_CR1_RXNEIE;
-
-  REG32(NVIC_ISER0_ADDR) = (1UL << USART1_IRQN);
+  USART_CR1(USART1_BASE) = USART_CR1_UE | USART_CR1_RE;
 }
 
 void USART1_IRQHandler(void)
@@ -315,6 +321,16 @@ int main(void)
 
   uint32_t last_overflow = 0U;
   for (;;) {
+    uint32_t isr = USART_ISR(USART1_BASE);
+    if ((isr & USART_ISR_ORE) != 0U) {
+      USART_ICR(USART1_BASE) = USART_ICR_ORECF;
+      log_line("[UART_DROP] reason=ore\n");
+    }
+    if ((isr & USART_ISR_RXNE) != 0U) {
+      uint8_t byte = (uint8_t)USART_RDR(USART1_BASE);
+      handle_uart_byte(byte);
+    }
+
     uint8_t byte = 0U;
     if (rx_pop(&byte)) {
       handle_uart_byte(byte);
