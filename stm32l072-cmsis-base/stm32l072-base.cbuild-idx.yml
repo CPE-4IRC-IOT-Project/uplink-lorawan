@@ -1,12 +1,15 @@
 build-idx:
-  generated-by: csolution version 2.1.0
+  generated-by: csolution version 2.12.0
   csolution: stm32l072-base.csolution.yml
+  tmpdir: tmp
   cprojects:
     - cproject: stm32l072-base.cproject.yml
   cbuilds:
-    - cbuild: stm32l072-base.Debug+STM32L072RB.cbuild.yml
-      project: stm32l072-base
-      configuration: .Debug+STM32L072RB
-    - cbuild: stm32l072-base.Release+STM32L072RB.cbuild.yml
+    - cbuild: out/stm32l072-base/STM32L072RB/Release/stm32l072-base.Release+STM32L072RB.cbuild.yml
       project: stm32l072-base
       configuration: .Release+STM32L072RB
+      messages:
+        info:
+          - stm32l072-base.cbuild-pack.yml - file is already up-to-date
+          - stm32l072-base.Release+STM32L072RB.cbuild.yml - file is already up-to-date
+  rebuild: true

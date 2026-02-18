@@ -1,18 +1,31 @@
-# STM32L072 CMSIS Base (Keil Studio Cloud)
+# STM32L072 CMSIS Base
 
-Projet de base CMSIS-Toolbox pour `STM32L072RBTx`.
+Projet CMSIS-Toolbox minimal pour `STM32L072RBTx`, avec startup et linker locaux (pas de dependance a CubeMX).
 
 ## Contenu
 
-- `stm32l072-base.csolution.yml`: solution CMSIS
-- `stm32l072-base.cproject.yml`: projet CMSIS
-- `src/main.c`: point d'entree minimal
+- `stm32l072-base.csolution.yml`: solution CMSIS (`Debug` / `Release`)
+- `stm32l072-base.cproject.yml`: projet CMSIS (CMSIS-CORE + sources locaux)
+- `src/main.c`: application minimale
+- `src/system_stm32l0xx.c`: stubs `SystemInit` et `SystemCoreClockUpdate`
+- `startup/startup_stm32l072xx.s`: vector table + `Reset_Handler`
+- `linker/stm32l072rb_flash.ld`: script linker FLASH/RAM
 
-## Import dans Keil Studio Cloud
+## Build local (VS Code / terminal)
 
-1. Ouvrir le repo dans Keil Studio Cloud.
-2. Ouvrir `stm32l072-cmsis-base/stm32l072-base.csolution.yml`.
-3. Laisser Keil installer les packs demandes si necessaire (`ARM::CMSIS` et `Keil::STM32L0xx_DFP`).
-4. Installer les packs demandes.
-5. Ouvrir la vue CMSIS Software Components et lancer le generateur `Device:CubeMX`.
-6. Compiler le contexte `Debug+STM32L072RB` (ou `Release+STM32L072RB`).
+Prerequis:
+- `csolution`, `cbuild`, `cpackget` (CMSIS-Toolbox)
+- Toolchain GCC ARM exportee dans `GCC_TOOLCHAIN_10_3_1`
+
+Exemple:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+export GCC_TOOLCHAIN_10_3_1="$HOME/.local/opt/xpack-arm-none-eabi-gcc-14.2.1-1.1/bin"
+cd stm32l072-cmsis-base
+
+cpackget add -a ARM::CMSIS Keil::STM32L0xx_DFP
+csolution convert stm32l072-base.csolution.yml -l required -t GCC -c .Debug+STM32L072RB
+cbuild stm32l072-base.csolution.yml -c .Debug+STM32L072RB --toolchain GCC --update-rte
+cbuild stm32l072-base.csolution.yml -c .Release+STM32L072RB --toolchain GCC --update-rte
+```

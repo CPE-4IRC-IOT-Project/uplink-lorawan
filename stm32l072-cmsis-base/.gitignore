@@ -1,0 +1,17 @@
+# CMSIS generated files
+RTE/
+out/
+STM32CubeMX/
+tmp/
+.cmsis/
+*.cbuild-idx.yml
+*.cbuild-pack.yml
+*.cbuild-set.yml
+*.cbuild.yml
+*.cprj
+
+# Build artifacts
+*.elf
+*.hex
+*.bin
+*.map

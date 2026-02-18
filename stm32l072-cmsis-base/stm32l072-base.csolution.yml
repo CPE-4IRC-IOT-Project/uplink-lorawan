@@ -1,6 +1,6 @@
 solution:
   created-for: CMSIS-Toolbox@2.7.0
-  compiler: AC6
+  compiler: GCC
   build-types:
     - type: Debug
     - type: Release

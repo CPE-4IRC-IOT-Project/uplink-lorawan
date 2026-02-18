@@ -3,6 +3,37 @@ project:
     - pack: ARM::CMSIS
     - pack: Keil::STM32L0xx_DFP
 
+  define:
+    - STM32L072xx
+
+  linker:
+    - script: ./linker/stm32l072rb_flash.ld
+
+  output:
+    type:
+      - elf
+      - hex
+      - bin
+      - map
+
+  misc:
+    - for-compiler: GCC
+      C:
+        - -ffreestanding
+      Link:
+        - -nostartfiles
+        - --specs=nosys.specs
+        - --specs=nano.specs
+        - -Wl,--gc-sections
+
   components:
-    - component: CMSIS:CORE
-    - component: Device:CubeMX
+    - component: ARM::CMSIS:CORE
+
+  groups:
+    - group: Application
+      files:
+        - file: ./src/main.c
+        - file: ./src/system_stm32l0xx.c
+    - group: Startup
+      files:
+        - file: ./startup/startup_stm32l072xx.s
