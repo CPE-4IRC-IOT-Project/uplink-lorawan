@@ -1,0 +1,12 @@
+build-idx:
+  generated-by: csolution version 2.1.0
+  csolution: stm32l072-base.csolution.yml
+  cprojects:
+    - cproject: stm32l072-base.cproject.yml
+  cbuilds:
+    - cbuild: stm32l072-base.Debug+STM32L072RB.cbuild.yml
+      project: stm32l072-base
+      configuration: .Debug+STM32L072RB
+    - cbuild: stm32l072-base.Release+STM32L072RB.cbuild.yml
+      project: stm32l072-base
+      configuration: .Release+STM32L072RB

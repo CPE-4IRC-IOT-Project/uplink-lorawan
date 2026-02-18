@@ -1,20 +1,8 @@
 project:
   packs:
     - pack: ARM::CMSIS
-    - pack: Keil::ARM_Compiler
-    - pack: Keil::STM32L0xx_DFP@2.3.0
-
-  output:
-    type:
-      - elf
-      - hex
-      - bin
+    - pack: Keil::STM32L0xx_DFP
 
   components:
     - component: CMSIS:CORE
-    - component: Device:Startup
-
-  groups:
-    - group: Application
-      files:
-        - file: ./src/main.c
+    - component: Device:CubeMX
