@@ -1,5 +1,8 @@
 solution:
   created-for: CMSIS-Toolbox@2.7.0
+  build-types:
+    - type: Debug
+    - type: Release
   target-types:
     - type: STM32L072RB
       device: STMicroelectronics::STM32L072RBTx
