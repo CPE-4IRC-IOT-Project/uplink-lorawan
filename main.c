@@ -8,7 +8,7 @@
 
 #define REG32(addr) (*(volatile uint32_t *)(addr))
 
-#define RCC_CFGR_ADDR       0x4002100CUL
+#define RCC_CFGR_ADDR       0x40021008UL
 #define RCC_IOPENR_ADDR     0x4002102CUL
 #define RCC_APB2ENR_ADDR    0x40021034UL
 #define RCC_APB1ENR_ADDR    0x40021038UL
@@ -280,6 +280,9 @@ static void gpio_init(void)
 static uint32_t get_apb1_clock_hz(void)
 {
   uint32_t hclk = SystemCoreClock;
+  if (hclk < 1000000UL || hclk > 64000000UL) {
+    hclk = 32000000UL;
+  }
   uint32_t cfgr = REG32(RCC_CFGR_ADDR);
 
   uint32_t hpre = (cfgr >> 4) & 0x0FU;
@@ -303,8 +306,8 @@ static uint32_t get_apb1_clock_hz(void)
 static void uart_init(void)
 {
   uint32_t pclk1_hz = get_apb1_clock_hz();
-  if (pclk1_hz == 0U) {
-    pclk1_hz = SystemCoreClock;
+  if (pclk1_hz < 1000000UL || pclk1_hz > 64000000UL) {
+    pclk1_hz = 32000000UL;
   }
   const uint32_t brr = (pclk1_hz + (BAUDRATE / 2UL)) / BAUDRATE;
 
