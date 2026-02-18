@@ -1,0 +1,7 @@
+solution:
+  created-for: CMSIS-Toolbox@2.7.0
+  target-types:
+    - type: STM32L072RB
+      device: STMicroelectronics::STM32L072RBTx
+  projects:
+    - project: stm32l072-base.cproject.yml
