@@ -1,9 +1,6 @@
-#include "RTE_Components.h"
-#include CMSIS_device_header
+#include "core_cm0plus.h"
 
 int main(void) {
-  SystemCoreClockUpdate();
-
   while (1) {
     __NOP();
   }

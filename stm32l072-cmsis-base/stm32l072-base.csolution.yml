@@ -1,5 +1,8 @@
 solution:
   created-for: CMSIS-Toolbox@2.7.0
+  select-compiler:
+    - compiler: AC6
+    - compiler: GCC
   build-types:
     - type: Debug
     - type: Release
