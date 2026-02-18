@@ -48,13 +48,6 @@
 
 #define BAUDRATE            115200UL
 
-#define RX_BUFFER_SIZE      256U
-#define RX_BUFFER_MASK      (RX_BUFFER_SIZE - 1U)
-
-static volatile uint8_t s_rx_buffer[RX_BUFFER_SIZE];
-static volatile uint16_t s_rx_head = 0U;
-static volatile uint16_t s_rx_tail = 0U;
-static volatile uint32_t s_rx_overflow = 0U;
 static uint32_t s_last_counter_by_node[256] = {0};
 
 #define LORAWAN_FPORT 15U
@@ -63,6 +56,7 @@ typedef struct {
   uint32_t rx_ok;
   uint32_t drop_crc;
   uint32_t drop_len;
+  uint32_t drop_ore;
   uint32_t drop_replay;
   uint32_t drop_ver;
   uint32_t tx_ok;
@@ -87,6 +81,11 @@ static uint8_t s_payload[UART_V1_PAYLOAD_LEN] = {0};
 static uint8_t s_payload_index = 0U;
 static uint8_t s_crc_rx[2] = {0};
 static uint8_t s_crc_index = 0U;
+static bool s_drop_logged_len = false;
+static bool s_drop_logged_crc = false;
+static bool s_drop_logged_ore = false;
+static bool s_drop_logged_replay = false;
+static bool s_drop_logged_ver = false;
 
 extern uint32_t SystemCoreClock;
 
@@ -129,17 +128,6 @@ static bool lorawan_send(uint8_t fport, const uint8_t *buf, uint8_t len)
   return true;
 }
 
-static int rx_pop(uint8_t *byte)
-{
-  if (s_rx_head == s_rx_tail) {
-    return 0;
-  }
-
-  *byte = s_rx_buffer[s_rx_tail];
-  s_rx_tail = (uint16_t)((s_rx_tail + 1U) & RX_BUFFER_MASK);
-  return 1;
-}
-
 static void parser_reset(void)
 {
   s_parser_state = PARSER_WAIT_SOF1;
@@ -155,14 +143,20 @@ static void on_payload_valid(const uint8_t *payload_bytes)
 
   if (frame.ver != UART_V1_VERSION) {
     s_stats.drop_ver++;
-    log_line("[UART_DROP] reason=ver\n");
+    if (!s_drop_logged_ver) {
+      s_drop_logged_ver = true;
+      log_line("[UART_DROP] reason=ver\n");
+    }
     return;
   }
 
   uint32_t last_counter = s_last_counter_by_node[frame.node_id];
   if (frame.counter <= last_counter) {
     s_stats.drop_replay++;
-    log_line("[UART_DROP] reason=replay\n");
+    if (!s_drop_logged_replay) {
+      s_drop_logged_replay = true;
+      log_line("[UART_DROP] reason=replay\n");
+    }
     return;
   }
   s_last_counter_by_node[frame.node_id] = frame.counter;
@@ -213,7 +207,10 @@ static void handle_uart_byte(uint8_t byte)
       s_parser_len = byte;
       if (s_parser_len != UART_V1_PAYLOAD_LEN) {
         s_stats.drop_len++;
-        log_line("[UART_DROP] reason=len\n");
+        if (!s_drop_logged_len) {
+          s_drop_logged_len = true;
+          log_line("[UART_DROP] reason=len\n");
+        }
         s_parser_state = (byte == UART_V1_SOF1) ? PARSER_WAIT_SOF2 : PARSER_WAIT_SOF1;
         break;
       }
@@ -239,7 +236,10 @@ static void handle_uart_byte(uint8_t byte)
         uint16_t crc_recv = ((uint16_t)s_crc_rx[0] << 8) | (uint16_t)s_crc_rx[1];
         if (crc_calc != crc_recv) {
           s_stats.drop_crc++;
-          log_line("[UART_DROP] reason=crc\n");
+          if (!s_drop_logged_crc) {
+            s_drop_logged_crc = true;
+            log_line("[UART_DROP] reason=crc\n");
+          }
         } else {
           on_payload_valid(s_payload);
         }
@@ -323,27 +323,6 @@ static void uart_init(void)
   USART_CR1(USART1_BASE) = USART_CR1_UE | USART_CR1_RE;
 }
 
-void USART1_IRQHandler(void)
-{
-  uint32_t isr = USART_ISR(USART1_BASE);
-
-  if ((isr & USART_ISR_ORE) != 0U) {
-    USART_ICR(USART1_BASE) = USART_ICR_ORECF;
-  }
-
-  if ((isr & USART_ISR_RXNE) != 0U) {
-    uint8_t rx = (uint8_t)USART_RDR(USART1_BASE);
-    uint16_t next = (uint16_t)((s_rx_head + 1U) & RX_BUFFER_MASK);
-
-    if (next != s_rx_tail) {
-      s_rx_buffer[s_rx_head] = rx;
-      s_rx_head = next;
-    } else {
-      s_rx_overflow++;
-    }
-  }
-}
-
 int main(void)
 {
   gpio_init();
@@ -352,26 +331,20 @@ int main(void)
   log_line("[BOOT] pclk1=%lu baud=%lu\n", (unsigned long)get_apb1_clock_hz(), (unsigned long)BAUDRATE);
   log_line("[BOOT] parser ready fport=%u\n", (unsigned)LORAWAN_FPORT);
 
-  uint32_t last_overflow = 0U;
   for (;;) {
-    uint32_t isr = USART_ISR(USART1_BASE);
-    if ((isr & USART_ISR_ORE) != 0U) {
-      USART_ICR(USART1_BASE) = USART_ICR_ORECF;
-      log_line("[UART_DROP] reason=ore\n");
-    }
-    if ((isr & USART_ISR_RXNE) != 0U) {
+    while ((USART_ISR(USART1_BASE) & USART_ISR_RXNE) != 0U) {
       uint8_t byte = (uint8_t)USART_RDR(USART1_BASE);
       handle_uart_byte(byte);
     }
 
-    uint8_t byte = 0U;
-    if (rx_pop(&byte)) {
-      handle_uart_byte(byte);
-    }
-
-    if (s_rx_overflow != last_overflow) {
-      uart2_write_string("\n[WARN] RX buffer overflow\n");
-      last_overflow = s_rx_overflow;
+    if ((USART_ISR(USART1_BASE) & USART_ISR_ORE) != 0U) {
+      USART_ICR(USART1_BASE) = USART_ICR_ORECF;
+      s_stats.drop_ore++;
+      parser_reset();
+      if (!s_drop_logged_ore) {
+        s_drop_logged_ore = true;
+        log_line("[UART_DROP] reason=ore\n");
+      }
     }
   }
 }
