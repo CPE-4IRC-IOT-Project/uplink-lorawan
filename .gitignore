@@ -5,3 +5,4 @@ compile_commands.json
 .cache
 mbed-os
 mbed_app_local.json
+ttn_credentials.h

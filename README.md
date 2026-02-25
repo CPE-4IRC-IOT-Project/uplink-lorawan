@@ -16,14 +16,14 @@ Bridge UART -> LoRaWAN (TTN) for `DISCO_L072CZ_LRWAN1`.
 
 ## Secure TTN credentials (not committed)
 
-Real identifiers/keys must stay local in `mbed_app_local.json`, which is ignored by Git.
+OTAA credentials are read from `ttn_credentials.h` (local file, ignored by Git).
 
 1. Copy the template:
-   - `cp mbed_app_local.example.json mbed_app_local.json`
-2. Edit `mbed_app_local.json` with your TTN values:
-   - `lora.device-eui`
-   - `lora.application-eui` (JoinEUI on TTN)
-   - `lora.application-key`
+   - `cp ttn_credentials.example.h ttn_credentials.h`
+2. Edit `ttn_credentials.h` with your values:
+   - `TTN_DEV_EUI`
+   - `TTN_APP_EUI` (JoinEUI on TTN)
+   - `TTN_APP_KEY`
 3. Build/flash normally.
 
-`mbed_app.json` contains only non-secret defaults (region, baudrate, FPort, OTAA enabled).
+`mbed_app.json` contains only non-secret defaults (region, baudrate).
