@@ -18,7 +18,7 @@ namespace {
 
 constexpr uint8_t LORAWAN_FPORT = 15U;
 constexpr int UART_BAUDRATE = 115200;
-constexpr size_t MAX_EVENTS = 32;
+constexpr auto UART_POLL_PERIOD = 100ms;
 
 typedef struct {
     uint32_t rx_ok;
@@ -39,9 +39,10 @@ enum parser_state_t {
 };
 
 UnbufferedSerial pc(USBTX, USBRX, UART_BAUDRATE);
-BufferedSerial esp(PA_9, PA_10, UART_BAUDRATE);
+UnbufferedSerial esp(PA_9, PA_10, UART_BAUDRATE);
+DigitalOut led_rx(LED1);
 
-EventQueue ev_queue(MAX_EVENTS * EVENTS_EVENT_SIZE);
+static EventQueue ev_queue;
 SX1276_LoRaRadio radio;
 LoRaWANInterface lorawan(radio);
 lorawan_app_callbacks_t callbacks = {};
@@ -49,8 +50,9 @@ lorawan_app_callbacks_t callbacks = {};
 runtime_stats_t stats = {};
 uint32_t last_counter_by_node[256] = {0};
 bool lora_joined = false;
-volatile bool uart_poll_scheduled = false;
+bool join_in_progress = false;
 bool rx_seen_once = false;
+uint32_t dropped_before_join = 0U;
 
 parser_state_t parser_state = PARSER_WAIT_SOF1;
 uint8_t parser_len = 0U;
@@ -78,6 +80,20 @@ void pc_log(const char *fmt, ...)
     pc.write(line, out_len);
 }
 
+void blink()
+{
+    led_rx = !led_rx;
+}
+
+void print_hex(const char *label, const uint8_t *buf, size_t len)
+{
+    pc_log("%s", label);
+    for (size_t i = 0; i < len; ++i) {
+        pc_log("%02X", (unsigned)buf[i]);
+    }
+    pc_log("\r\n");
+}
+
 void parser_reset()
 {
     parser_state = PARSER_WAIT_SOF1;
@@ -89,7 +105,10 @@ void parser_reset()
 bool lorawan_send(uint8_t fport, const uint8_t *buf, uint8_t len)
 {
     if (!lora_joined) {
-        pc_log("Not joined yet\r\n");
+        dropped_before_join++;
+        if ((dropped_before_join % 10U) == 1U) {
+            pc_log("Not joined yet (%lu payloads dropped)\r\n", (unsigned long)dropped_before_join);
+        }
         return false;
     }
 
@@ -225,6 +244,10 @@ void handle_uart_byte(uint8_t byte)
 
 void poll_uart_esp()
 {
+    if (!lora_joined) {
+        return;
+    }
+
     uint8_t byte = 0;
     while (true) {
         ssize_t n = esp.read(&byte, 1);
@@ -234,18 +257,6 @@ void poll_uart_esp()
         }
         break;
     }
-    uart_poll_scheduled = false;
-}
-
-void on_uart_esp_activity()
-{
-    if (!uart_poll_scheduled) {
-        uart_poll_scheduled = true;
-        int id = ev_queue.call(poll_uart_esp);
-        if (id == 0) {
-            uart_poll_scheduled = false;
-        }
-    }
 }
 
 void lora_event_handler(lorawan_event_t event)
@@ -253,6 +264,7 @@ void lora_event_handler(lorawan_event_t event)
     switch (event) {
         case CONNECTED:
             lora_joined = true;
+            join_in_progress = false;
             pc_log("LoRaWAN JOIN SUCCESS\r\n");
             break;
         case TX_DONE:
@@ -260,10 +272,12 @@ void lora_event_handler(lorawan_event_t event)
             break;
         case JOIN_FAILURE:
             lora_joined = false;
+            join_in_progress = false;
             pc_log("JOIN FAILED\r\n");
             break;
         case DISCONNECTED:
             lora_joined = false;
+            join_in_progress = false;
             pc_log("DISCONNECTED\r\n");
             break;
         case RX_DONE:
@@ -276,7 +290,15 @@ void lora_event_handler(lorawan_event_t event)
             pc_log("TX ERROR event=%d\r\n", (int)event);
             break;
         default:
+            pc_log("LORA EVENT=%d\r\n", (int)event);
             break;
+    }
+}
+
+void join_status_tick()
+{
+    if (join_in_progress && !lora_joined) {
+        pc_log("JOIN PENDING...\r\n");
     }
 }
 
@@ -284,10 +306,15 @@ void lora_event_handler(lorawan_event_t event)
 
 int main()
 {
+    pc.set_blocking(true);
     esp.set_blocking(false);
-    esp.sigio(mbed::callback(on_uart_esp_activity));
 
+    const char boot_msg[] = "STM32 BOOT\r\n";
+    pc.write(boot_msg, sizeof(boot_msg) - 1U);
     pc_log("STM32 ready - UART -> TTN bridge\r\n");
+    pc_log("UART ESP on PA9/PA10 @115200\r\n");
+    print_hex("DEV_EUI=", TTN_DEV_EUI, 8);
+    print_hex("APP_EUI=", TTN_APP_EUI, 8);
 
     lorawan_status_t init = lorawan.initialize(&ev_queue);
     if (init != LORAWAN_STATUS_OK) {
@@ -306,14 +333,20 @@ int main()
     params.connection_u.otaa.dev_eui = TTN_DEV_EUI;
     params.connection_u.otaa.app_eui = TTN_APP_EUI;
     params.connection_u.otaa.app_key = TTN_APP_KEY;
-    params.connection_u.otaa.nb_trials = 3;
+    params.connection_u.otaa.nb_trials = 12;
 
     pc_log("Joining TTN...\r\n");
     lorawan_status_t ret = lorawan.connect(params);
+    pc_log("connect() ret=%d\r\n", (int)ret);
     if (ret != LORAWAN_STATUS_OK && ret != LORAWAN_STATUS_CONNECT_IN_PROGRESS) {
         pc_log("Join start failed: %d\r\n", (int)ret);
+    } else {
+        join_in_progress = true;
     }
 
+    ev_queue.call_every(UART_POLL_PERIOD, poll_uart_esp);
+    ev_queue.call_every(1s, blink);
+    ev_queue.call_every(10s, join_status_tick);
     ev_queue.dispatch_forever();
     return 0;
 }
