@@ -19,7 +19,7 @@ project(${APP_TARGET})
 
 target_sources(${APP_TARGET}
     PRIVATE
-        main.c
+        main.cpp
 )
 
 target_link_libraries(${APP_TARGET}
