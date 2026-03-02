@@ -15,7 +15,9 @@
  * limitations under the License.
  */
 #include <stdio.h>
+#include <string.h>
 
+#include "mbed.h"
 #include "lorawan/LoRaWANInterface.h"
 #include "lorawan/system/lorawan_data_structures.h"
 #include "events/EventQueue.h"
@@ -24,6 +26,7 @@
 #include "DummySensor.h"
 #include "trace_helper.h"
 #include "lora_radio_helper.h"
+#include "protocol_uart_v1.h"
 
 using namespace events;
 
@@ -49,6 +52,8 @@ uint8_t rx_buffer[30];
  * Maximum number of retries for CONFIRMED messages before giving up
  */
 #define CONFIRMED_MSG_RETRY_COUNTER     3
+#define UART_RETRY_TIMER_MS             500
+#define UART_BAUDRATE                   115200
 
 /**
  * Dummy pin for dummy sensor
@@ -76,6 +81,7 @@ static EventQueue ev_queue(MAX_NUMBER_OF_EVENTS *EVENTS_EVENT_SIZE);
  * application which in turn drive the application.
  */
 static void lora_event_handler(lorawan_event_t event);
+static bool read_next_uart_payload(uint8_t out_payload[UART_V1_PAYLOAD_LEN]);
 
 /**
  * Constructing Mbed LoRaWANInterface and passing it the radio object from lora_radio_helper.
@@ -88,12 +94,109 @@ static LoRaWANInterface lorawan(radio);
 static lorawan_app_callbacks_t callbacks;
 
 /**
+ * UART link from external board:
+ * RX on PA_10 (D2), TX on PA_9
+ */
+static UnbufferedSerial uart_link(PA_9, PA_10, UART_BAUDRATE);
+
+static uint8_t parser_state = 0;
+static uint8_t parser_len = 0;
+static uint8_t parser_payload[UART_V1_PAYLOAD_LEN] = {0};
+static uint8_t parser_payload_index = 0;
+static uint8_t parser_crc[2] = {0};
+static uint8_t parser_crc_index = 0;
+
+static void parser_reset(void)
+{
+    parser_state = 0;
+    parser_len = 0;
+    parser_payload_index = 0;
+    parser_crc_index = 0;
+}
+
+static bool read_next_uart_payload(uint8_t out_payload[UART_V1_PAYLOAD_LEN])
+{
+    uint8_t byte = 0;
+    size_t consumed = 0;
+
+    while (consumed < 128) {
+        ssize_t n = uart_link.read(&byte, 1);
+        if (n != 1) {
+            break;
+        }
+        consumed++;
+
+        switch (parser_state) {
+            case 0: // WAIT SOF1
+                if (byte == UART_V1_SOF1) {
+                    parser_state = 1;
+                }
+                break;
+
+            case 1: // WAIT SOF2
+                if (byte == UART_V1_SOF2) {
+                    parser_state = 2;
+                } else if (byte != UART_V1_SOF1) {
+                    parser_state = 0;
+                }
+                break;
+
+            case 2: // WAIT LEN
+                parser_len = byte;
+                if (parser_len != UART_V1_PAYLOAD_LEN) {
+                    printf("\r\n UART frame drop: bad len=%u (expected %u)\r\n",
+                           parser_len, UART_V1_PAYLOAD_LEN);
+                    parser_state = (byte == UART_V1_SOF1) ? 1 : 0;
+                    break;
+                }
+                parser_payload_index = 0;
+                parser_state = 3;
+                break;
+
+            case 3: // READ PAYLOAD
+                parser_payload[parser_payload_index++] = byte;
+                if (parser_payload_index >= UART_V1_PAYLOAD_LEN) {
+                    parser_crc_index = 0;
+                    parser_state = 4;
+                }
+                break;
+
+            case 4: // READ CRC
+                parser_crc[parser_crc_index++] = byte;
+                if (parser_crc_index >= 2) {
+                    uint8_t crc_input[1 + UART_V1_PAYLOAD_LEN];
+                    crc_input[0] = parser_len;
+                    memcpy(&crc_input[1], parser_payload, UART_V1_PAYLOAD_LEN);
+                    uint16_t crc_calc = uart_v1_crc16_ccitt(crc_input, sizeof(crc_input));
+                    uint16_t crc_recv = ((uint16_t)parser_crc[0] << 8) | (uint16_t)parser_crc[1];
+                    if (crc_calc == crc_recv) {
+                        memcpy(out_payload, parser_payload, UART_V1_PAYLOAD_LEN);
+                        parser_reset();
+                        return true;
+                    }
+                    printf("\r\n UART frame drop: bad crc\r\n");
+                    parser_reset();
+                }
+                break;
+
+            default:
+                parser_reset();
+                break;
+        }
+    }
+
+    return false;
+}
+
+/**
  * Entry point for application
  */
 int main(void)
 {
     // setup tracing
     setup_trace();
+    uart_link.set_blocking(false);
+    printf("\r\n UART bridge ready (RX=PA10/D2, TX=PA9, %d bps)\r\n", UART_BAUDRATE);
 
     // stores the status of a call to LoRaWAN protocol
     lorawan_status_t retcode;
@@ -150,22 +253,26 @@ int main(void)
  */
 static void send_message()
 {
-    uint16_t packet_len;
+    uint16_t packet_len = 0;
     int16_t retcode;
-    int32_t sensor_value;
+    uint8_t payload16[UART_V1_PAYLOAD_LEN];
 
-    if (ds1820.begin()) {
-        ds1820.startConversion();
-        sensor_value = ds1820.read();
-        printf("\r\n Dummy Sensor Value = %d \r\n", sensor_value);
-        ds1820.startConversion();
-    } else {
-        printf("\r\n No sensor found \r\n");
+    if (!read_next_uart_payload(payload16)) {
+        printf("\r\n No complete UART frame yet on PA10/D2, retrying... \r\n");
+        if (MBED_CONF_LORA_DUTY_CYCLE_ON) {
+            ev_queue.call_in(UART_RETRY_TIMER_MS, send_message);
+        }
         return;
     }
 
-    packet_len = sprintf((char *) tx_buffer, "Dummy Sensor Value is %d",
-                         sensor_value);
+    packet_len = UART_V1_PAYLOAD_LEN;
+    memcpy(tx_buffer, payload16, packet_len);
+
+    printf("\r\n UART payload ready (%u bytes): ", packet_len);
+    for (uint16_t i = 0; i < packet_len; i++) {
+        printf("%02x ", tx_buffer[i]);
+    }
+    printf("\r\n");
 
     retcode = lorawan.send(MBED_CONF_LORA_APP_PORT, tx_buffer, packet_len,
                            MSG_UNCONFIRMED_FLAG);
@@ -179,11 +286,15 @@ static void send_message()
             if (MBED_CONF_LORA_DUTY_CYCLE_ON) {
                 ev_queue.call_in(3000, send_message);
             }
+        } else {
+            if (MBED_CONF_LORA_DUTY_CYCLE_ON) {
+                ev_queue.call_in(UART_RETRY_TIMER_MS, send_message);
+            }
         }
         return;
     }
 
-    printf("\r\n %d bytes scheduled for transmission \r\n", retcode);
+    printf("\r\n %d bytes scheduled for transmission on port %d \r\n", retcode, MBED_CONF_LORA_APP_PORT);
     memset(tx_buffer, 0, sizeof(tx_buffer));
 }
 
@@ -217,7 +328,7 @@ static void lora_event_handler(lorawan_event_t event)
 {
     switch (event) {
         case CONNECTED:
-            printf("\r\n Connection - Successful \r\n");
+            printf("\r\n Connection - Successful (joined TTN) \r\n");
             if (MBED_CONF_LORA_DUTY_CYCLE_ON) {
                 send_message();
             } else {
