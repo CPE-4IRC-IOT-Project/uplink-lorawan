@@ -1,545 +1,270 @@
-#include <cstdint>
-#include <cstdio>
-#include <cstring>
-#include <chrono>
+/**
+ * Copyright (c) 2017, Arm Limited and affiliates.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+#include <stdio.h>
 
-#include "mbed.h"
-#include "events/EventQueue.h"
 #include "lorawan/LoRaWANInterface.h"
-#include "SX1276_LoRaRadio.h"
+#include "lorawan/system/lorawan_data_structures.h"
+#include "events/EventQueue.h"
 
-#include "protocol_uart_v1.h"
-#include "ttn_credentials.h"
+// Application helpers
+#include "DummySensor.h"
+#include "trace_helper.h"
+#include "lora_radio_helper.h"
 
 using namespace events;
 
-namespace {
+// Max payload size can be LORAMAC_PHY_MAXPAYLOAD.
+// This example only communicates with much shorter messages (<30 bytes).
+// If longer messages are used, these buffers must be changed accordingly.
+uint8_t tx_buffer[30];
+uint8_t rx_buffer[30];
 
-constexpr uint8_t LORAWAN_FPORT = 15U;
-constexpr auto UART_POLL_PERIOD = 20ms;
-constexpr auto JOIN_STATUS_PERIOD = 10s;
-constexpr auto JOIN_RETRY_DELAY = 30s;
-constexpr auto JOIN_STUCK_TIMEOUT = 120s;
-constexpr auto JOIN_RESTART_DELAY = 2s;
-constexpr auto TX_RETRY_DELAY = 3s;
-constexpr auto TX_STATUS_PERIOD = 5s;
-constexpr auto TX_STUCK_TIMEOUT = 20s;
-constexpr bool HEARTBEAT_THROTTLE_ENABLED = false;
-constexpr auto HEARTBEAT_MIN_UPLINK_PERIOD = 10s;
-constexpr uint8_t PERSON_COUNT_STABLE_FRAMES = 5U;
+/*
+ * Sets up an application dependent transmission timer in ms. Used only when Duty Cycling is off for testing
+ */
+#define TX_TIMER                        10000
 
-UnbufferedSerial pc(USBTX, USBRX, 115200);
-UnbufferedSerial esp(PA_9, PA_10, 115200);
+/**
+ * Maximum number of events for the event queue.
+ * 10 is the safe number for the stack events, however, if application
+ * also uses the queue for whatever purposes, this number should be increased.
+ */
+#define MAX_NUMBER_OF_EVENTS            10
 
-static EventQueue ev_queue;
-SX1276_LoRaRadio radio;
-LoRaWANInterface lorawan(radio);
-lorawan_app_callbacks_t lora_callbacks = {};
+/**
+ * Maximum number of retries for CONFIRMED messages before giving up
+ */
+#define CONFIRMED_MSG_RETRY_COUNTER     3
 
-volatile bool lora_joined = false;
-volatile bool join_in_progress = false;
-uint32_t join_attempt = 0;
-lorawan_connect_t join_params = {};
-Kernel::Clock::time_point join_started_at{};
+/**
+ * Dummy pin for dummy sensor
+ */
+#define PC_9                            0
 
-enum parser_state_t {
-    PARSER_WAIT_SOF1 = 0,
-    PARSER_WAIT_SOF2,
-    PARSER_WAIT_LEN,
-    PARSER_READ_PAYLOAD,
-    PARSER_READ_CRC
-};
+/**
+ * Dummy sensor class object
+ */
+DS1820  ds1820(PC_9);
 
-parser_state_t parser_state = PARSER_WAIT_SOF1;
-uint8_t parser_len = 0U;
-uint8_t payload[UART_V1_PAYLOAD_LEN] = {0};
-uint8_t payload_index = 0U;
-uint8_t crc_rx[2] = {0};
-uint8_t crc_index = 0U;
-uint32_t last_counter_by_node[256] = {0};
+/**
+* This event queue is the global event queue for both the
+* application and stack. To conserve memory, the stack is designed to run
+* in the same thread as the application and the application is responsible for
+* providing an event queue to the stack that will be used for ISR deferment as
+* well as application information event queuing.
+*/
+static EventQueue ev_queue(MAX_NUMBER_OF_EVENTS *EVENTS_EVENT_SIZE);
 
-bool tx_in_flight = false;
-bool pending_payload_valid = false;
-bool pending_payload_is_heartbeat = false;
-uint8_t pending_payload[UART_V1_PAYLOAD_LEN] = {0};
-int tx_retry_event_id = 0;
-int join_retry_event_id = 0;
-bool heartbeat_sent_once = false;
-Kernel::Clock::time_point last_heartbeat_sent_at{};
-Kernel::Clock::time_point tx_started_at{};
-bool last_tx_has_payload = false;
-uint32_t last_tx_counter = 0;
-uint8_t last_tx_node_id = 0;
-uint8_t last_tx_msg_type = 0;
-uint8_t last_tx_occupied = 0;
-bool person_count_candidate_valid = false;
-uint8_t person_count_candidate = 0U;
-uint8_t person_count_candidate_streak = 0U;
-bool person_count_last_sent_valid = false;
-uint8_t person_count_last_sent = 0U;
+/**
+ * Event handler.
+ *
+ * This will be passed to the LoRaWAN stack to queue events for the
+ * application which in turn drive the application.
+ */
+static void lora_event_handler(lorawan_event_t event);
 
-void pc_puts(const char *s)
+/**
+ * Constructing Mbed LoRaWANInterface and passing it the radio object from lora_radio_helper.
+ */
+static LoRaWANInterface lorawan(radio);
+
+/**
+ * Application specific callbacks
+ */
+static lorawan_app_callbacks_t callbacks;
+
+/**
+ * Entry point for application
+ */
+int main(void)
 {
-    pc.write(s, strlen(s));
-}
+    // setup tracing
+    setup_trace();
 
-void pc_logf(const char *fmt, int v)
-{
-    char line[64];
-    int n = snprintf(line, sizeof(line), fmt, v);
-    if (n > 0) {
-        pc.write(line, static_cast<size_t>(n));
+    // stores the status of a call to LoRaWAN protocol
+    lorawan_status_t retcode;
+
+    // Initialize LoRaWAN stack
+    if (lorawan.initialize(&ev_queue) != LORAWAN_STATUS_OK) {
+        printf("\r\n LoRa initialization failed! \r\n");
+        return -1;
     }
+
+    printf("\r\n Mbed LoRaWANStack initialized \r\n");
+
+    // prepare application callbacks
+    callbacks.events = mbed::callback(lora_event_handler);
+    lorawan.add_app_callbacks(&callbacks);
+
+    // Set number of retries in case of CONFIRMED messages
+    if (lorawan.set_confirmed_msg_retries(CONFIRMED_MSG_RETRY_COUNTER)
+            != LORAWAN_STATUS_OK) {
+        printf("\r\n set_confirmed_msg_retries failed! \r\n\r\n");
+        return -1;
+    }
+
+    printf("\r\n CONFIRMED message retries : %d \r\n",
+           CONFIRMED_MSG_RETRY_COUNTER);
+
+    // Enable adaptive data rate
+    if (lorawan.enable_adaptive_datarate() != LORAWAN_STATUS_OK) {
+        printf("\r\n enable_adaptive_datarate failed! \r\n");
+        return -1;
+    }
+
+    printf("\r\n Adaptive data  rate (ADR) - Enabled \r\n");
+
+    retcode = lorawan.connect();
+
+    if (retcode == LORAWAN_STATUS_OK ||
+            retcode == LORAWAN_STATUS_CONNECT_IN_PROGRESS) {
+    } else {
+        printf("\r\n Connection error, code = %d \r\n", retcode);
+        return -1;
+    }
+
+    printf("\r\n Connection - In Progress ...\r\n");
+
+    // make your event queue dispatching events forever
+    ev_queue.dispatch_forever();
+
+    return 0;
 }
 
-void parser_reset()
+/**
+ * Sends a message to the Network Server
+ */
+static void send_message()
 {
-    parser_state = PARSER_WAIT_SOF1;
-    parser_len = 0U;
-    payload_index = 0U;
-    crc_index = 0U;
-}
+    uint16_t packet_len;
+    int16_t retcode;
+    int32_t sensor_value;
 
-void queue_latest_payload(const uint8_t *pl, bool is_heartbeat)
-{
-    memcpy(pending_payload, pl, UART_V1_PAYLOAD_LEN);
-    pending_payload_valid = true;
-    pending_payload_is_heartbeat = is_heartbeat;
-}
-
-void flush_pending_payload();
-void start_join_attempt();
-
-void schedule_join_retry(Kernel::Clock::duration delay)
-{
-    if (join_retry_event_id != 0) {
+    if (ds1820.begin()) {
+        ds1820.startConversion();
+        sensor_value = ds1820.read();
+        printf("\r\n Dummy Sensor Value = %d \r\n", sensor_value);
+        ds1820.startConversion();
+    } else {
+        printf("\r\n No sensor found \r\n");
         return;
     }
 
-    join_retry_event_id = ev_queue.call_in(delay, []() {
-        join_retry_event_id = 0;
-        start_join_attempt();
-    });
-}
+    packet_len = sprintf((char *) tx_buffer, "Dummy Sensor Value is %d",
+                         sensor_value);
 
-void schedule_tx_retry()
-{
-    if (tx_retry_event_id == 0) {
-        tx_retry_event_id = ev_queue.call_in(TX_RETRY_DELAY, flush_pending_payload);
-    }
-}
+    retcode = lorawan.send(MBED_CONF_LORA_APP_PORT, tx_buffer, packet_len,
+                           MSG_UNCONFIRMED_FLAG);
 
-bool send_uart_payload(const uint8_t *pl, bool is_heartbeat)
-{
-    if (!lora_joined) {
-        return false;
-    }
+    if (retcode < 0) {
+        retcode == LORAWAN_STATUS_WOULD_BLOCK ? printf("send - WOULD BLOCK\r\n")
+        : printf("\r\n send() - Error code %d \r\n", retcode);
 
-    if (HEARTBEAT_THROTTLE_ENABLED && is_heartbeat && heartbeat_sent_once) {
-        auto now = Kernel::Clock::now();
-        auto min_period = std::chrono::duration_cast<Kernel::Clock::duration>(HEARTBEAT_MIN_UPLINK_PERIOD);
-        if ((now - last_heartbeat_sent_at) < min_period) {
-            // Drop frequent heartbeats; occupancy changes are still forwarded.
-            pc_puts("Heartbeat throttled\r\n");
-            return false;
-        }
-    }
-
-    int16_t status = lorawan.send(LORAWAN_FPORT, const_cast<uint8_t *>(pl), UART_V1_PAYLOAD_LEN, MSG_UNCONFIRMED_FLAG);
-    if (status >= 0) {
-        tx_in_flight = true;
-        tx_started_at = Kernel::Clock::now();
-        last_tx_has_payload = true;
-        last_tx_msg_type = pl[1];
-        last_tx_node_id = pl[2];
-        last_tx_occupied = pl[5];
-        last_tx_counter = uart_v1_read_be32(&pl[8]);
-        if (is_heartbeat) {
-            heartbeat_sent_once = true;
-            last_heartbeat_sent_at = Kernel::Clock::now();
-        }
-        pc_puts("Trame UART envoyee a la radio (queued)\r\n");
-        return true;
-    }
-
-    if (status == LORAWAN_STATUS_WOULD_BLOCK ||
-        status == LORAWAN_STATUS_BUSY ||
-        status == LORAWAN_STATUS_DUTYCYCLE_RESTRICTED ||
-        status == LORAWAN_STATUS_NO_FREE_CHANNEL_FOUND) {
-        if (status == LORAWAN_STATUS_DUTYCYCLE_RESTRICTED) {
-            pc_puts("LoRa duty-cycle restricted\r\n");
-        } else if (status == LORAWAN_STATUS_NO_FREE_CHANNEL_FOUND) {
-            pc_puts("LoRa no free channel\r\n");
-        } else if (status == LORAWAN_STATUS_BUSY || status == LORAWAN_STATUS_WOULD_BLOCK) {
-            pc_puts("LoRa busy/would_block\r\n");
-        }
-        queue_latest_payload(pl, is_heartbeat);
-        schedule_tx_retry();
-    }
-
-    char line[64];
-    int n = snprintf(line, sizeof(line), "UART uplink err: %d\r\n", (int)status);
-    if (n > 0) {
-        pc.write(line, static_cast<size_t>(n));
-    }
-    return false;
-}
-
-void flush_pending_payload()
-{
-    tx_retry_event_id = 0;
-
-    if (!pending_payload_valid || !lora_joined) {
-        if (pending_payload_valid) {
-            schedule_tx_retry();
-        }
-        return;
-    }
-
-    uint8_t pl[UART_V1_PAYLOAD_LEN];
-    memcpy(pl, pending_payload, UART_V1_PAYLOAD_LEN);
-    bool is_heartbeat = pending_payload_is_heartbeat;
-    pending_payload_valid = false;
-    pc_puts("Tentative d'envoi de la trame en attente\r\n");
-
-    bool sent = send_uart_payload(pl, is_heartbeat);
-    if (!sent && pending_payload_valid) {
-        schedule_tx_retry();
-    }
-}
-
-void on_payload_valid(const uint8_t *payload_bytes)
-{
-    vision_uart_payload_v1_t frame;
-    deserialize_payload_v1(&frame, payload_bytes);
-
-    if (frame.ver != UART_V1_VERSION) {
-        pc_puts("[UART_DROP] reason=ver\r\n");
-        return;
-    }
-
-    uint32_t last_counter = last_counter_by_node[frame.node_id];
-    if (frame.counter <= last_counter) {
-        pc_puts("[UART_DROP] reason=replay\r\n");
-        return;
-    }
-    last_counter_by_node[frame.node_id] = frame.counter;
-
-    char line[96];
-    int n = snprintf(line,
-                     sizeof(line),
-                     "[UART_OK] t=%lu ctr=%lu occ=%u raw=%u stable=%u l=%u\r\n",
-                     (unsigned long)frame.uptime_s,
-                     (unsigned long)frame.counter,
-                     (unsigned)frame.occupied,
-                     (unsigned)frame.raw_count,
-                     (unsigned)frame.stable_count,
-                     (unsigned)frame.luma);
-    if (n > 0) {
-        pc.write(line, static_cast<size_t>(n));
-    }
-
-    uint8_t persons = frame.raw_count;
-
-    if (!person_count_candidate_valid || persons != person_count_candidate) {
-        person_count_candidate_valid = true;
-        person_count_candidate = persons;
-        person_count_candidate_streak = 1U;
-    } else if (person_count_candidate_streak < PERSON_COUNT_STABLE_FRAMES) {
-        person_count_candidate_streak++;
-    }
-
-    bool stable_ready = (person_count_candidate_streak >= PERSON_COUNT_STABLE_FRAMES);
-    if (!stable_ready) {
-        n = snprintf(line,
-                     sizeof(line),
-                     "[UART_FILTER] persons=%u streak=%u/%u sent_last=%u\r\n",
-                     (unsigned)persons,
-                     (unsigned)person_count_candidate_streak,
-                     (unsigned)PERSON_COUNT_STABLE_FRAMES,
-                     person_count_last_sent_valid ? (unsigned)person_count_last_sent : 255U);
-        if (n > 0) {
-            pc.write(line, static_cast<size_t>(n));
-        }
-        return;
-    }
-
-    n = snprintf(line,
-                 sizeof(line),
-                 "[UART_STABLE] persons=%u confirmed -> uplink\r\n",
-                 (unsigned)person_count_candidate);
-    if (n > 0) {
-        pc.write(line, static_cast<size_t>(n));
-    }
-
-    if (!person_count_last_sent_valid && !SEND_INITIAL_STABLE_UPLINK) {
-        person_count_last_sent = person_count_candidate;
-        person_count_last_sent_valid = true;
-        person_count_candidate_valid = false;
-        person_count_candidate_streak = 0U;
-        n = snprintf(line,
-                     sizeof(line),
-                     "[UART_BASELINE] persons=%u stored (no uplink at boot)\r\n",
-                     (unsigned)person_count_last_sent);
-        if (n > 0) {
-            pc.write(line, static_cast<size_t>(n));
-        }
-        return;
-    }
-
-    bool is_heartbeat = (frame.msg_type == UART_V1_MSG_HEARTBEAT);
-    bool sent = send_uart_payload(payload_bytes, is_heartbeat);
-    if (sent) {
-        person_count_last_sent = person_count_candidate;
-        person_count_last_sent_valid = true;
-        person_count_candidate_valid = false;
-        person_count_candidate_streak = 0U;
-    }
-    n = snprintf(line,
-                 sizeof(line),
-                 "[LORA_TX] port=%u len=%u ok=%u\r\n",
-                 (unsigned)LORAWAN_FPORT,
-                 (unsigned)UART_V1_PAYLOAD_LEN,
-                 sent ? 1U : 0U);
-    if (n > 0) {
-        pc.write(line, static_cast<size_t>(n));
-    }
-}
-
-void handle_uart_byte(uint8_t byte)
-{
-    switch (parser_state) {
-        case PARSER_WAIT_SOF1:
-            if (byte == UART_V1_SOF1) {
-                parser_state = PARSER_WAIT_SOF2;
+        if (retcode == LORAWAN_STATUS_WOULD_BLOCK) {
+            //retry in 3 seconds
+            if (MBED_CONF_LORA_DUTY_CYCLE_ON) {
+                ev_queue.call_in(3000, send_message);
             }
-            break;
-
-        case PARSER_WAIT_SOF2:
-            if (byte == UART_V1_SOF2) {
-                parser_state = PARSER_WAIT_LEN;
-            } else if (byte != UART_V1_SOF1) {
-                parser_state = PARSER_WAIT_SOF1;
-            }
-            break;
-
-        case PARSER_WAIT_LEN:
-            parser_len = byte;
-            if (parser_len != UART_V1_PAYLOAD_LEN) {
-                pc_puts("[UART_DROP] reason=len\r\n");
-                parser_state = (byte == UART_V1_SOF1) ? PARSER_WAIT_SOF2 : PARSER_WAIT_SOF1;
-                break;
-            }
-            payload_index = 0U;
-            parser_state = PARSER_READ_PAYLOAD;
-            break;
-
-        case PARSER_READ_PAYLOAD:
-            payload[payload_index++] = byte;
-            if (payload_index >= UART_V1_PAYLOAD_LEN) {
-                crc_index = 0U;
-                parser_state = PARSER_READ_CRC;
-            }
-            break;
-
-        case PARSER_READ_CRC:
-            crc_rx[crc_index++] = byte;
-            if (crc_index >= 2U) {
-                uint8_t crc_input[1U + UART_V1_PAYLOAD_LEN];
-                crc_input[0] = parser_len;
-                memcpy(&crc_input[1], payload, UART_V1_PAYLOAD_LEN);
-                uint16_t crc_calc = uart_v1_crc16_ccitt(crc_input, sizeof(crc_input));
-                uint16_t crc_recv = ((uint16_t)crc_rx[0] << 8) | (uint16_t)crc_rx[1];
-                if (crc_calc != crc_recv) {
-                    pc_puts("[UART_DROP] reason=crc\r\n");
-                } else {
-                    on_payload_valid(payload);
-                }
-                parser_reset();
-            }
-            break;
-    }
-}
-
-void poll_uart_esp()
-{
-    if (!lora_joined) {
-        return;
-    }
-
-    uint8_t byte = 0;
-    while (true) {
-        ssize_t n = esp.read(&byte, 1);
-        if (n == 1) {
-            handle_uart_byte(byte);
-            continue;
         }
-        break;
-    }
-}
-
-void start_join_attempt()
-{
-    if (lora_joined || join_in_progress) {
         return;
     }
 
-    join_attempt++;
-    join_started_at = Kernel::Clock::now();
-    char line[64];
-    int n = snprintf(line, sizeof(line), "Join attempt #%lu\r\n", (unsigned long)join_attempt);
-    if (n > 0) {
-        pc.write(line, static_cast<size_t>(n));
-    }
-
-    lorawan_status_t ret = lorawan.connect(join_params);
-    n = snprintf(line, sizeof(line), "connect() ret=%d\r\n", (int)ret);
-    if (n > 0) {
-        pc.write(line, static_cast<size_t>(n));
-    }
-
-    join_in_progress = (ret == LORAWAN_STATUS_OK || ret == LORAWAN_STATUS_CONNECT_IN_PROGRESS);
-    if (!join_in_progress) {
-        // Stack is not ready yet (e.g. BUSY), try again later.
-        schedule_join_retry(JOIN_RETRY_DELAY);
-    }
+    printf("\r\n %d bytes scheduled for transmission \r\n", retcode);
+    memset(tx_buffer, 0, sizeof(tx_buffer));
 }
 
-void restart_join_after_timeout()
+/**
+ * Receive a message from the Network Server
+ */
+static void receive_message()
 {
-    pc_puts("JOIN watchdog timeout, retry join\r\n");
-    join_in_progress = false;
-    schedule_join_retry(std::chrono::duration_cast<Kernel::Clock::duration>(JOIN_RESTART_DELAY));
+    uint8_t port;
+    int flags;
+    int16_t retcode = lorawan.receive(rx_buffer, sizeof(rx_buffer), port, flags);
+
+    if (retcode < 0) {
+        printf("\r\n receive() - Error code %d \r\n", retcode);
+        return;
+    }
+
+    printf(" RX Data on port %u (%d bytes): ", port, retcode);
+    for (uint8_t i = 0; i < retcode; i++) {
+        printf("%02x ", rx_buffer[i]);
+    }
+    printf("\r\n");
+    
+    memset(rx_buffer, 0, sizeof(rx_buffer));
 }
 
-void lora_event_handler(lorawan_event_t event)
+/**
+ * Event handler
+ */
+static void lora_event_handler(lorawan_event_t event)
 {
     switch (event) {
         case CONNECTED:
-            pc_puts("LoRaWAN JOIN SUCCESS\r\n");
-            lora_joined = true;
-            join_in_progress = false;
-            if (pending_payload_valid) {
-                ev_queue.call(flush_pending_payload);
-            }
-            break;
-
-        case TX_DONE:
-            if (last_tx_has_payload) {
-                char line[128];
-                int n = snprintf(line,
-                                 sizeof(line),
-                                 "[LORA_SENT] TX_DONE node=%u ctr=%lu msg=%u occ=%u\r\n",
-                                 (unsigned)last_tx_node_id,
-                                 (unsigned long)last_tx_counter,
-                                 (unsigned)last_tx_msg_type,
-                                 (unsigned)last_tx_occupied);
-                if (n > 0) {
-                    pc.write(line, static_cast<size_t>(n));
-                }
-                last_tx_has_payload = false;
+            printf("\r\n Connection - Successful \r\n");
+            if (MBED_CONF_LORA_DUTY_CYCLE_ON) {
+                send_message();
             } else {
-                pc_puts("TX DONE\r\n");
+                ev_queue.call_every(TX_TIMER, send_message);
             }
-            tx_in_flight = false;
-            if (pending_payload_valid) {
-                ev_queue.call(flush_pending_payload);
+
+            break;
+        case DISCONNECTED:
+            ev_queue.break_dispatch();
+            printf("\r\n Disconnected Successfully \r\n");
+            break;
+        case TX_DONE:
+            printf("\r\n Message Sent to Network Server \r\n");
+            if (MBED_CONF_LORA_DUTY_CYCLE_ON) {
+                send_message();
             }
             break;
-
         case TX_TIMEOUT:
         case TX_ERROR:
         case TX_CRYPTO_ERROR:
         case TX_SCHEDULING_ERROR:
-            tx_in_flight = false;
-            schedule_tx_retry();
+            printf("\r\n Transmission Error - EventCode = %d \r\n", event);
+            // try again
+            if (MBED_CONF_LORA_DUTY_CYCLE_ON) {
+                send_message();
+            }
             break;
-
+        case RX_DONE:
+            printf("\r\n Received message from Network Server \r\n");
+            receive_message();
+            break;
+        case RX_TIMEOUT:
+        case RX_ERROR:
+            printf("\r\n Error in reception - Code = %d \r\n", event);
+            break;
         case JOIN_FAILURE:
-            pc_puts("JOIN FAILED\r\n");
-            lora_joined = false;
-            join_in_progress = false;
-            tx_in_flight = false;
-            schedule_join_retry(std::chrono::duration_cast<Kernel::Clock::duration>(JOIN_RETRY_DELAY));
+            printf("\r\n OTAA Failed - Check Keys \r\n");
             break;
-
-        case DISCONNECTED:
-            pc_puts("DISCONNECTED\r\n");
-            lora_joined = false;
-            join_in_progress = false;
-            tx_in_flight = false;
-            schedule_join_retry(std::chrono::duration_cast<Kernel::Clock::duration>(JOIN_RETRY_DELAY));
+        case UPLINK_REQUIRED:
+            printf("\r\n Uplink required by NS \r\n");
+            if (MBED_CONF_LORA_DUTY_CYCLE_ON) {
+                send_message();
+            }
             break;
-
         default:
-            pc_logf("LORA EVENT=%d\r\n", (int)event);
-            break;
+            MBED_ASSERT("Unknown Event");
     }
 }
 
-void join_status_tick()
-{
-    if (join_in_progress && !lora_joined) {
-        auto elapsed = Kernel::Clock::now() - join_started_at;
-        auto elapsed_s = std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
-        char line[64];
-        int n = snprintf(line, sizeof(line), "JOIN PENDING... %lus\r\n", (unsigned long)elapsed_s);
-        if (n > 0) {
-            pc.write(line, static_cast<size_t>(n));
-        }
-
-        auto timeout = std::chrono::duration_cast<Kernel::Clock::duration>(JOIN_STUCK_TIMEOUT);
-        if (elapsed >= timeout) {
-            restart_join_after_timeout();
-        }
-    }
-}
-
-void tx_status_tick()
-{
-    if (!tx_in_flight) {
-        return;
-    }
-
-    auto elapsed = Kernel::Clock::now() - tx_started_at;
-    auto timeout = std::chrono::duration_cast<Kernel::Clock::duration>(TX_STUCK_TIMEOUT);
-    if (elapsed >= timeout) {
-        pc_puts("TX watchdog timeout, release queue\r\n");
-        tx_in_flight = false;
-        schedule_tx_retry();
-    }
-}
-
-} // namespace
-
-int main()
-{
-    pc.set_blocking(true);
-    esp.set_blocking(false);
-
-    pc_puts("STM32 ready - UART -> TTN bridge\r\n");
-
-    lorawan_status_t init = lorawan.initialize(&ev_queue);
-    if (init != LORAWAN_STATUS_OK) {
-        pc_logf("LoRa init failed: %d\r\n", (int)init);
-        return -1;
-    }
-
-    lora_callbacks.events = mbed::callback(lora_event_handler);
-    lorawan.add_app_callbacks(&lora_callbacks);
-
-    join_params.connect_type = LORAWAN_CONNECTION_OTAA;
-    join_params.connection_u.otaa.dev_eui = TTN_DEV_EUI;
-    join_params.connection_u.otaa.app_eui = TTN_APP_EUI;
-    join_params.connection_u.otaa.app_key = TTN_APP_KEY;
-    join_params.connection_u.otaa.nb_trials = 12;
-
-    pc_puts("Joining TTN...\r\n");
-    start_join_attempt();
-
-    ev_queue.call_every(UART_POLL_PERIOD, poll_uart_esp);
-    ev_queue.call_every(JOIN_STATUS_PERIOD, join_status_tick);
-    ev_queue.call_every(TX_STATUS_PERIOD, tx_status_tick);
-    ev_queue.dispatch_forever();
-    return 0;
-}
+// EOF
