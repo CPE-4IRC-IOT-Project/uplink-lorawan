@@ -82,6 +82,7 @@ static EventQueue ev_queue(MAX_NUMBER_OF_EVENTS *EVENTS_EVENT_SIZE);
  */
 static void lora_event_handler(lorawan_event_t event);
 static bool read_next_uart_payload(uint8_t out_payload[UART_V1_PAYLOAD_LEN]);
+static bool anti_replay_accept_uart_payload(const uint8_t payload16[UART_V1_PAYLOAD_LEN]);
 
 /**
  * Constructing Mbed LoRaWANInterface and passing it the radio object from lora_radio_helper.
@@ -105,6 +106,8 @@ static uint8_t parser_payload[UART_V1_PAYLOAD_LEN] = {0};
 static uint8_t parser_payload_index = 0;
 static uint8_t parser_crc[2] = {0};
 static uint8_t parser_crc_index = 0;
+static uint32_t s_last_counter_by_node[256] = {0};
+static bool s_counter_seen_by_node[256] = {0};
 
 static void parser_reset(void)
 {
@@ -188,6 +191,29 @@ static bool read_next_uart_payload(uint8_t out_payload[UART_V1_PAYLOAD_LEN])
     return false;
 }
 
+static bool anti_replay_accept_uart_payload(const uint8_t payload16[UART_V1_PAYLOAD_LEN])
+{
+    vision_uart_payload_v1_t payload = {};
+    deserialize_payload_v1(&payload, payload16);
+
+    const uint8_t node_id = payload.node_id;
+    const uint32_t counter = payload.counter;
+    const bool seen = s_counter_seen_by_node[node_id];
+    const uint32_t last_counter = s_last_counter_by_node[node_id];
+
+    if (seen && counter <= last_counter) {
+        printf("\r\n UART frame drop: stale/replay node=%u counter=%lu last=%lu\r\n",
+               node_id,
+               (unsigned long)counter,
+               (unsigned long)last_counter);
+        return false;
+    }
+
+    s_counter_seen_by_node[node_id] = true;
+    s_last_counter_by_node[node_id] = counter;
+    return true;
+}
+
 /**
  * Entry point for application
  */
@@ -256,9 +282,17 @@ static void send_message()
     uint16_t packet_len = 0;
     int16_t retcode;
     uint8_t payload16[UART_V1_PAYLOAD_LEN];
+    bool accepted_frame = false;
 
-    if (!read_next_uart_payload(payload16)) {
-        printf("\r\n No complete UART frame yet on PA10/D2, retrying... \r\n");
+    while (read_next_uart_payload(payload16)) {
+        if (anti_replay_accept_uart_payload(payload16)) {
+            accepted_frame = true;
+            break;
+        }
+    }
+
+    if (!accepted_frame) {
+        printf("\r\n No usable UART frame yet on PA10/D2, retrying... \r\n");
         if (MBED_CONF_LORA_DUTY_CYCLE_ON) {
             ev_queue.call_in(UART_RETRY_TIMER_MS, send_message);
         }

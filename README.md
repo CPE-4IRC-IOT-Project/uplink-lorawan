@@ -1,29 +1,36 @@
 # uplink-lorawan
 
-Bridge UART -> LoRaWAN (TTN) for `DISCO_L072CZ_LRWAN1`.
+Bridge STM32 (`DISCO_L072CZ_LRWAN1`) entre UART et TTN (LoRaWAN OTAA).
 
-## Behavior
+## Fonctionnement rapide
 
-- UART input wire format: `0x55 0xAA | len(16) | payload(16) | crc16`.
-- Payload validation:
-  - fixed length `16`
-  - CRC16-CCITT check
-  - anti-replay via monotonic `counter` per `node_id`
-- LoRaWAN uplink:
-  - sends the validated 16-byte payload as-is
-  - FPort `15`
-  - OTAA join to TTN
+1. Lit les trames UART v1 venant de l'ESP32-P4:
+   `0x55 0xAA | len=16 | payload(16) | crc16`.
+2. Vérifie la longueur et le CRC (`CRC16-CCITT`).
+3. Envoie le `payload` brut de 16 octets en LoRaWAN sur le port applicatif `FPort 15`.
+4. Gestion via pile Mbed LoRaWAN (ADR activé, OTAA).
 
-## Secure TTN credentials (not committed)
+Le code principal est dans `main.cpp`.
 
-OTAA credentials are read from `ttn_credentials.h` (local file, ignored by Git).
+## Configuration TTN (locale, non commit)
 
-1. Copy the template:
-   - `cp ttn_credentials.example.h ttn_credentials.h`
-2. Edit `ttn_credentials.h` with your values:
-   - `TTN_DEV_EUI`
-   - `TTN_APP_EUI` (JoinEUI on TTN)
-   - `TTN_APP_KEY`
-3. Build/flash normally.
+Créer `ttn_credentials.h` depuis le template:
 
-`mbed_app.json` contains only non-secret defaults (region, baudrate).
+```bash
+cp ttn_credentials.example.h ttn_credentials.h
+```
+
+Puis renseigner:
+- `TTN_DEV_EUI`
+- `TTN_APP_EUI` (JoinEUI)
+- `TTN_APP_KEY`
+
+## Build (Mbed)
+
+Exemple avec `mbed-tools`:
+
+```bash
+mbed-tools compile -m DISCO_L072CZ_LRWAN1 -t GCC_ARM
+```
+
+Les paramètres radio/région/app-port sont dans `mbed_app.json`.
